@@ -12,23 +12,11 @@ const crypto = require('crypto');
 // ------------------------------------------------------------------------------
 // 1. KONFIGURASI ENVIRONMENT (Fail-Closed)
 // ------------------------------------------------------------------------------
-// Fallback membaca .env jika dijalankan tanpa flag --env-file
-const defaultEnvPath = path.join(__dirname, '.env');
-if (fs.existsSync(defaultEnvPath)) {
-    try {
-        const lines = fs.readFileSync(defaultEnvPath, 'utf8').split('\n');
-        for (const l of lines) {
-            const t = l.trim();
-            if (t && !t.startsWith('#')) {
-                const idx = t.indexOf('=');
-                if (idx > 0) {
-                    const k = t.slice(0, idx).trim();
-                    const v = t.slice(idx + 1).trim();
-                    if (!process.env[k]) process.env[k] = v;
-                }
-            }
-        }
-    } catch (e) {}
+// Node v22 parses quotes/comments and preserves existing environment values.
+try {
+    process.loadEnvFile(path.join(__dirname, '.env'));
+} catch (err) {
+    if (err.code !== 'ENOENT') throw new Error('ENV_FILE_LOAD_FAILED');
 }
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
