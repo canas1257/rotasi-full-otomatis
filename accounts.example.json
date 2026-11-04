@@ -1,0 +1,15 @@
+{
+  "bot1": {
+    "type": "growid",
+    "name": "MY_GROWID_BOT_1",
+    "password": "MY_SECRET_PASSWORD"
+  },
+  "bot2": {
+    "type": "token",
+    "email": "synthetic.bot@example.com",
+    "ltoken": "VGVzdFRva2VuQmFzZTY0",
+    "mac": "11:22:33:AA:BB:CC",
+    "rid": "0123456789ABCDEF0123456789ABCDEF",
+    "wk": "FEDCBA9876543210FEDCBA9876543210"
+  }
+}
