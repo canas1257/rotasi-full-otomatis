@@ -10,6 +10,28 @@ const http = require('http');
 // ------------------------------------------------------------------------------
 // 1. KONFIGURASI ENVIRONMENT
 // ------------------------------------------------------------------------------
+const fs = require('fs');
+const path = require('path');
+
+// Fallback membaca .env jika dijalankan tanpa flag --env-file
+const defaultEnvPath = path.join(__dirname, '.env');
+if (fs.existsSync(defaultEnvPath)) {
+    try {
+        const lines = fs.readFileSync(defaultEnvPath, 'utf8').split('\n');
+        for (const l of lines) {
+            const t = l.trim();
+            if (t && !t.startsWith('#')) {
+                const idx = t.indexOf('=');
+                if (idx > 0) {
+                    const k = t.slice(0, idx).trim();
+                    const v = t.slice(idx + 1).trim();
+                    if (!process.env[k]) process.env[k] = v;
+                }
+            }
+        }
+    } catch (e) {}
+}
+
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const ALLOWED_USERS = (process.env.ALLOWED_USERS || '805286573302218772')
     .split(',')
