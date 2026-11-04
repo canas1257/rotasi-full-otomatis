@@ -1,7 +1,7 @@
 // ==============================================================================
 // DISCORD BOT CONTROLLER FOR LUCIFER BRIDGE (Zero-Dependency Node.js v22)
 // Author    : Salsa & Bos Anas
-// QC Status : In Review by Anna (@anna)
+// QC Status : Hardened with Anna's QC Review (WHATWG WebSocket & Testable)
 // ==============================================================================
 
 const https = require('https');
@@ -17,15 +17,16 @@ const ALLOWED_USERS = (process.env.ALLOWED_USERS || '805286573302218772')
     .filter(Boolean);
 
 const API_PORT = process.env.PORT || '3000';
-const API_SECRET = process.env.API_SECRET || 'secret-token-lucifer-2026';
+const API_SECRET = process.env.API_SECRET || '';
 const API_BASE_URL = process.env.API_URL || `http://127.0.0.1:${API_PORT}`;
 
 // ------------------------------------------------------------------------------
 // 2. DISCORD REST API HELPER (Mengirim pesan ke Discord)
 // ------------------------------------------------------------------------------
-function sendDiscordMessage(channelId, content, embed) {
-    if (!BOT_TOKEN) {
-        console.warn('[Discord Bot] BOT_TOKEN belum dikonfigurasi, skip kirim pesan.');
+function sendDiscordMessage(channelId, content, embed, tokenOverride, callback) {
+    const activeToken = tokenOverride || BOT_TOKEN;
+    if (!activeToken) {
+        if (callback) callback(new Error('BOT_TOKEN_NOT_CONFIGURED'));
         return;
     }
 
@@ -39,18 +40,21 @@ function sendDiscordMessage(channelId, content, embed) {
         path: `/api/v10/channels/${channelId}/messages`,
         method: 'POST',
         headers: {
-            'Authorization': `Bot ${BOT_TOKEN}`,
+            'Authorization': `Bot ${activeToken}`,
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(body)
         }
     }, res => {
-        if (res.statusCode >= 400) {
-            console.error(`[Discord API Error] Status ${res.statusCode}`);
-        }
+        let resData = '';
+        res.on('data', chunk => { resData += chunk; });
+        res.on('end', () => {
+            if (callback) callback(null, res.statusCode, resData);
+        });
     });
 
     req.on('error', err => {
-        console.error('[Discord Request Error]:', err.message);
+        if (callback) callback(err);
+        else console.error('[Discord Request Error]:', err.message);
     });
 
     req.write(body);
@@ -60,7 +64,8 @@ function sendDiscordMessage(channelId, content, embed) {
 // ------------------------------------------------------------------------------
 // 3. BRIDGE API CLIENT (Berkomunikasi dengan server.js)
 // ------------------------------------------------------------------------------
-function callBridgeApi(method, endpoint, postData, callback) {
+function callBridgeApi(method, endpoint, postData, secretOverride, callback) {
+    const activeSecret = secretOverride || API_SECRET;
     const url = new URL(endpoint, API_BASE_URL);
     const isHttps = url.protocol === 'https:';
     const client = isHttps ? https : http;
@@ -71,7 +76,7 @@ function callBridgeApi(method, endpoint, postData, callback) {
         path: url.pathname,
         method: method,
         headers: {
-            'Authorization': `Bearer ${API_SECRET}`,
+            'Authorization': `Bearer ${activeSecret}`,
             'Content-Type': 'application/json'
         }
     };
@@ -103,8 +108,76 @@ function callBridgeApi(method, endpoint, postData, callback) {
 }
 
 // ------------------------------------------------------------------------------
-// 4. DISCORD GATEWAY V10 (Native WebSocket)
+// 4. PROTOKOL GATEWAY V10 (WHATWG EventTarget Compatible)
 // ------------------------------------------------------------------------------
+function setupGatewayListeners(ws, token, onMessageCreate) {
+    let heartbeatInterval = null;
+    let lastSequence = null;
+
+    ws.addEventListener('open', () => {
+        console.log('[Discord Gateway] Terhubung ke Discord Gateway!');
+    });
+
+    ws.addEventListener('message', (event) => {
+        let msg;
+        try {
+            msg = JSON.parse(event.data);
+        } catch (e) {
+            return;
+        }
+
+        if (msg.s !== null && msg.s !== undefined) lastSequence = msg.s;
+
+        // Opcode 10: Hello (Heartbeat & Identify)
+        if (msg.op === 10) {
+            const interval = msg.d.heartbeat_interval;
+            heartbeatInterval = setInterval(() => {
+                try {
+                    ws.send(JSON.stringify({ op: 1, d: lastSequence }));
+                } catch (e) {}
+            }, interval);
+
+            // Identify Packet
+            ws.send(JSON.stringify({
+                op: 2,
+                d: {
+                    token: token,
+                    intents: 33280, // GUILDS (1) + GUILD_MESSAGES (512) + MESSAGE_CONTENT (32768)
+                    properties: {
+                        os: 'linux',
+                        browser: 'lucifer-bridge',
+                        device: 'lucifer-bridge'
+                    }
+                }
+            }));
+        }
+
+        // Opcode 0: Dispatch
+        if (msg.op === 0) {
+            if (msg.t === 'READY') {
+                console.log(`[Discord Bot Ready] Login sebagai: ${msg.d.user.username}#${msg.d.user.discriminator}`);
+            }
+
+            if (msg.t === 'MESSAGE_CREATE' && onMessageCreate) {
+                onMessageCreate(msg.d);
+            }
+        }
+    });
+
+    ws.addEventListener('close', (event) => {
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        console.warn(`[Discord Gateway Closed] Code: ${event.code}, Reason: ${event.reason}`);
+    });
+
+    ws.addEventListener('error', (err) => {
+        console.error('[Discord Gateway Error]:', err.message || err);
+    });
+
+    return () => {
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+    };
+}
+
 function startDiscordBot() {
     if (!BOT_TOKEN) {
         console.log('[Discord Bot] DISCORD_BOT_TOKEN tidak ditemukan di environment. Bot Discord tidak dijalankan.');
@@ -117,73 +190,16 @@ function startDiscordBot() {
     }
 
     const ws = new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json');
-    let heartbeatInterval = null;
-    let lastSequence = null;
-
-    ws.on('open', () => {
-        console.log('[Discord Gateway] Terhubung ke Discord Gateway!');
-    });
-
-    ws.on('message', data => {
-        let msg;
-        try {
-            msg = JSON.parse(data.toString());
-        } catch (e) {
-            return;
-        }
-
-        if (msg.s !== null) lastSequence = msg.s;
-
-        // Opcode 10: Hello (Inisialisasi Heartbeat & Identify)
-        if (msg.op === 10) {
-            const interval = msg.d.heartbeat_interval;
-            heartbeatInterval = setInterval(() => {
-                ws.send(JSON.stringify({ op: 1, d: lastSequence }));
-            }, interval);
-
-            // Identify Packet
-            ws.send(JSON.stringify({
-                op: 2,
-                d: {
-                    token: BOT_TOKEN,
-                    intents: 33280, // GUILDS (1) + GUILD_MESSAGES (512) + MESSAGE_CONTENT (32768)
-                    properties: {
-                        os: 'linux',
-                        browser: 'lucifer-bridge',
-                        device: 'lucifer-bridge'
-                    }
-                }
-            }));
-        }
-
-        // Opcode 0: Dispatch Events
-        if (msg.op === 0) {
-            if (msg.t === 'READY') {
-                console.log(`[Discord Bot Ready] Login sebagai: ${msg.d.user.username}#${msg.d.user.discriminator}`);
-            }
-
-            if (msg.t === 'MESSAGE_CREATE') {
-                handleIncomingMessage(msg.d);
-            }
-        }
-    });
-
-    ws.on('close', (code, reason) => {
-        clearInterval(heartbeatInterval);
-        console.warn(`[Discord Gateway Closed] Code: ${code}, Reason: ${reason}. Reconnecting in 5s...`);
-        setTimeout(startDiscordBot, 5000);
-    });
-
-    ws.on('error', err => {
-        console.error('[Discord Gateway Error]:', err.message);
+    setupGatewayListeners(ws, BOT_TOKEN, (msg) => {
+        handleIncomingMessage(msg, sendDiscordMessage, (m, e, d, cb) => callBridgeApi(m, e, d, null, cb));
     });
 }
 
 // ------------------------------------------------------------------------------
 // 5. COMMAND HANDLERS
 // ------------------------------------------------------------------------------
-function handleIncomingMessage(msg) {
-    if (!msg || !msg.content || msg.author.bot) return;
+function handleIncomingMessage(msg, messageSender = sendDiscordMessage, apiCaller = callBridgeApi) {
+    if (!msg || !msg.content || (msg.author && msg.author.bot)) return;
 
     const content = msg.content.trim();
     if (!content.startsWith('!')) return;
@@ -192,10 +208,10 @@ function handleIncomingMessage(msg) {
     const command = parts[0].toLowerCase();
     const args = parts.slice(1);
 
-    // Otorisasi Pengguna (Hanya ALLOWED_USERS yang berhak menjalankan bot)
-    const authorId = msg.author.id;
+    // Otorisasi Pengguna (Hanya ALLOWED_USERS yang berhak menjalankan perintah)
+    const authorId = msg.author && msg.author.id;
     if (!ALLOWED_USERS.includes(authorId)) {
-        return; // Silent ignore untuk user yang tidak diizinkan
+        return; // Fail-closed: abaikan user yang tidak diizinkan
     }
 
     // --------------------------------------------------------------------------
@@ -208,11 +224,11 @@ function handleIncomingMessage(msg) {
             color: 3447003,
             fields: [
                 { name: '!status', value: 'Melihat status antrean tugas dan ringkasan bot.', inline: false },
-                { name: '!addbot <alias>', value: 'Menambahkan bot baru ke antrean berdasarkan alias akun lokal di `accounts.json` (Contoh: `!addbot bot1`).', inline: false }
+                { name: '!addbot <alias>', value: 'Menambahkan bot ke antrean berdasarkan alias lokal di `accounts.json` (Contoh: `!addbot bot1`).', inline: false }
             ],
             footer: { text: 'Keamanan: Password tidak pernah diketik di chat Discord.' }
         };
-        sendDiscordMessage(msg.channel_id, null, helpEmbed);
+        messageSender(msg.channel_id, null, helpEmbed);
         return;
     }
 
@@ -220,12 +236,12 @@ function handleIncomingMessage(msg) {
     // Command: !status
     // --------------------------------------------------------------------------
     if (command === '!status') {
-        callBridgeApi('GET', '/api/jobs', null, (err, statusCode, data) => {
+        apiCaller('GET', '/api/jobs', null, null, (err, statusCode, data) => {
             if (err || statusCode !== 200) {
-                return sendDiscordMessage(msg.channel_id, `❌ Gagal menghubungi server bridge: ${err ? err.message : `HTTP ${statusCode}`}`);
+                return messageSender(msg.channel_id, `❌ Gagal menghubungi server bridge: ${err ? err.message : `HTTP ${statusCode}`}`);
             }
 
-            const jobs = data.jobs || [];
+            const jobs = (data && data.jobs) || [];
             const counts = {
                 pending: jobs.filter(j => j.status === 'pending').length,
                 claimed: jobs.filter(j => j.status === 'claimed').length,
@@ -238,7 +254,7 @@ function handleIncomingMessage(msg) {
                 title: '📊 Status Antrean Bot Lucifer',
                 color: counts.failed > 0 ? 15158332 : 3066993,
                 fields: [
-                    { name: 'Total Tugas', value: tostring(data.total), inline: true },
+                    { name: 'Total Tugas', value: tostring(data ? data.total : 0), inline: true },
                     { name: 'Pending', value: tostring(counts.pending), inline: true },
                     { name: 'Claimed', value: tostring(counts.claimed), inline: true },
                     { name: 'Online / Berhasil', value: tostring(counts.success), inline: true },
@@ -248,14 +264,13 @@ function handleIncomingMessage(msg) {
                 timestamp: new Date().toISOString()
             };
 
-            // Tambahkan rincian 5 tugas terakhir
             if (jobs.length > 0) {
                 const recent = jobs.slice(-5).reverse();
                 const listText = recent.map(j => `• **${j.bot_id}** [${j.job_id}]: \`${j.status}\``).join('\n');
                 statusEmbed.fields.push({ name: '5 Tugas Terakhir', value: listText, inline: false });
             }
 
-            sendDiscordMessage(msg.channel_id, null, statusEmbed);
+            messageSender(msg.channel_id, null, statusEmbed);
         });
         return;
     }
@@ -266,12 +281,13 @@ function handleIncomingMessage(msg) {
     if (command === '!addbot') {
         const alias = args[0];
         if (!alias) {
-            return sendDiscordMessage(msg.channel_id, '⚠️ Format salah! Gunakan: `!addbot <alias>`\nContoh: `!addbot bot1`\n*(Daftar alias akun dikonfigurasi di file lokal `accounts.json`)*');
+            return messageSender(msg.channel_id, '⚠️ Format salah! Gunakan: `!addbot <alias>`\nContoh: `!addbot bot1`\n*(Daftar alias akun dikonfigurasi di file lokal `accounts.json`)*');
         }
 
-        callBridgeApi('POST', '/api/jobs', { alias: alias, action: 'add_and_start' }, (err, statusCode, data) => {
+        // Aksi 'addbot' sesuai kontrak BRIDGE.md
+        apiCaller('POST', '/api/jobs', { alias: alias, action: 'addbot' }, null, (err, statusCode, data) => {
             if (err) {
-                return sendDiscordMessage(msg.channel_id, `❌ Gagal menghubungi server bridge: ${err.message}`);
+                return messageSender(msg.channel_id, `❌ Gagal menghubungi server bridge: ${err.message}`);
             }
 
             if (statusCode === 201) {
@@ -285,10 +301,10 @@ function handleIncomingMessage(msg) {
                     ],
                     footer: { text: 'Tugas akan otomatis dieksekusi oleh Lua saat polling berikutnya.' }
                 };
-                sendDiscordMessage(msg.channel_id, null, addEmbed);
+                messageSender(msg.channel_id, null, addEmbed);
             } else {
                 const errMsg = (data && data.error) ? data.error : `HTTP ${statusCode}`;
-                sendDiscordMessage(msg.channel_id, `❌ Gagal menambahkan tugas: \`${errMsg}\``);
+                messageSender(msg.channel_id, `❌ Gagal menambahkan tugas: \`${errMsg}\``);
             }
         });
         return;
@@ -303,4 +319,10 @@ if (require.main === module) {
     startDiscordBot();
 }
 
-module.exports = { startDiscordBot, handleIncomingMessage };
+module.exports = {
+    startDiscordBot,
+    setupGatewayListeners,
+    handleIncomingMessage,
+    sendDiscordMessage,
+    callBridgeApi
+};

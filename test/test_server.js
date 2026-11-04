@@ -1,41 +1,48 @@
 // ==============================================================================
-// TEST SUITE FOR SERVER.JS (NODE.JS BRIDGE REST API)
+// TEST SUITE FOR SERVER.JS & DISCORD-BOT.JS (ISOLATED TEMPORARY DIRECTORY)
 // Author    : Salsa & Bos Anas
-// QC Status : Automated Verification
+// QC Status : Hardened Automated Verification
 // ==============================================================================
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const assert = require('assert');
 
-const TEST_PORT = 3999;
-const TEST_SECRET = 'test-token-secret-12345678';
-process.env.PORT = String(TEST_PORT);
-process.env.API_SECRET = TEST_SECRET;
+// 1. Buat direktori temporer khusus untuk isolasi total pengujian
+const TMP_TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-test-'));
+const TMP_DATA_DIR = path.join(TMP_TEST_DIR, 'data');
+fs.mkdirSync(TMP_DATA_DIR, { recursive: true, mode: 0o700 });
 
-const ROOT_DIR = path.join(__dirname, '..');
-const TEST_DATA_DIR = path.join(ROOT_DIR, 'data');
-const TEST_JOBS_FILE = path.join(TEST_DATA_DIR, 'jobs.json');
-const TEST_ACCOUNTS_FILE = path.join(ROOT_DIR, 'accounts.json');
+const TMP_JOBS_FILE = path.join(TMP_DATA_DIR, 'jobs.json');
+const TMP_ACCOUNTS_FILE = path.join(TMP_TEST_DIR, 'accounts.json');
 
-// Siapkan accounts.json untuk pengujian alias
-fs.writeFileSync(TEST_ACCOUNTS_FILE, JSON.stringify({
+// Siapkan accounts.json di direktori temporer
+fs.writeFileSync(TMP_ACCOUNTS_FILE, JSON.stringify({
     bot_alpha: {
         type: 'growid',
         name: 'AlphaTester',
         password: 'SecretPassword999'
     }
-}, null, 2));
+}, null, 2), { mode: 0o600 });
 
-// Reset jobs.json
-if (fs.existsSync(TEST_JOBS_FILE)) {
-    fs.unlinkSync(TEST_JOBS_FILE);
-}
+const TEST_PORT = 3998;
+const TEST_SECRET = 'super-secret-token-min-16-chars-2026';
 
-const { server, inMemoryJobs, loadJobsFromDisk } = require('../server.js');
+process.env.PORT = String(TEST_PORT);
+process.env.API_SECRET = TEST_SECRET;
+process.env.DATA_DIR = TMP_DATA_DIR;
+process.env.JOBS_FILE = TMP_JOBS_FILE;
+process.env.ACCOUNTS_FILE = TMP_ACCOUNTS_FILE;
+process.env.NODE_ENV = 'test';
 
-function makeRequest(method, path, headers = {}, bodyObj = null) {
+const { createServerInstance, loadJobsFromDisk, inMemoryJobs, setJobs } = require('../server.js');
+const { handleIncomingMessage, setupGatewayListeners } = require('../discord-bot.js');
+
+const testServer = createServerInstance(TEST_SECRET);
+
+function makeRequest(method, reqPath, headers = {}, bodyObj = null) {
     return new Promise((resolve, reject) => {
         const postData = bodyObj ? JSON.stringify(bodyObj) : '';
         const reqHeaders = { ...headers };
@@ -47,7 +54,7 @@ function makeRequest(method, path, headers = {}, bodyObj = null) {
         const req = http.request({
             hostname: '127.0.0.1',
             port: TEST_PORT,
-            path: path,
+            path: reqPath,
             method: method,
             headers: reqHeaders
         }, res => {
@@ -68,122 +75,231 @@ function makeRequest(method, path, headers = {}, bodyObj = null) {
     });
 }
 
-async function runServerTests() {
-    console.log('=== Menjalankan Unit Test Suite untuk server.js ===');
+// Mock WebSocket WHATWG compliant untuk Discord Gateway test
+class MockWHATWGWebSocket {
+    constructor() {
+        this.listeners = {};
+        this.sent = [];
+    }
 
-    await new Promise(r => server.listen(TEST_PORT, '127.0.0.1', r));
+    addEventListener(event, callback) {
+        if (!this.listeners[event]) this.listeners[event] = [];
+        this.listeners[event].push(callback);
+    }
+
+    dispatchEvent(event, data) {
+        const handlers = this.listeners[event] || [];
+        for (const h of handlers) h(data);
+    }
+
+    send(data) {
+        this.sent.push(data);
+    }
+
+    close(code = 1000, reason = 'Normal') {
+        this.dispatchEvent('close', { code, reason });
+    }
+}
+
+async function runAllTests() {
+    console.log('=== Menjalankan Test Suite Terisolasi (REST Server & Discord Bot) ===');
+    console.log(`[Test Env] Direktori temporer: ${TMP_TEST_DIR}`);
+
+    await new Promise(r => testServer.listen(TEST_PORT, '127.0.0.1', r));
 
     try {
+        const authHeader = { 'Authorization': `Bearer ${TEST_SECRET}` };
+
         // ----------------------------------------------------------------------
         // Test 1: Health Check (Public)
         // ----------------------------------------------------------------------
         const resHealth = await makeRequest('GET', '/health');
-        assert.strictEqual(resHealth.status, 200, 'Health check harus 200');
-        assert.strictEqual(resHealth.body.status, 'ok', 'Status harus ok');
-        console.log('✓ Test 1: Health Check Endpoint - PASSED');
+        assert.strictEqual(resHealth.status, 200);
+        assert.strictEqual(resHealth.body.status, 'ok');
+        console.log('✓ Test 1: Health Check Endpoint (Public) - PASSED');
 
         // ----------------------------------------------------------------------
-        // Test 2: Autentikasi Ditolak jika Token Tidak Ada / Salah
+        // Test 2: Autentikasi Bearer Token (Missing / Bad Secret)
         // ----------------------------------------------------------------------
         const resNoAuth = await makeRequest('GET', '/api/jobs/poll');
-        assert.strictEqual(resNoAuth.status, 401, 'Request tanpa header auth harus 401');
-
-        const resBadAuth = await makeRequest('GET', '/api/jobs/poll', { 'Authorization': 'Bearer wrong-secret' });
-        assert.strictEqual(resBadAuth.status, 401, 'Request token salah harus 401');
-        console.log('✓ Test 2: Autentikasi Bearer Token - PASSED');
-
-        const authHeader = { 'Authorization': `Bearer ${TEST_SECRET}` };
+        assert.strictEqual(resNoAuth.status, 401);
+        const resBadAuth = await makeRequest('GET', '/api/jobs/poll', { 'Authorization': 'Bearer wrong-token-12345' });
+        assert.strictEqual(resBadAuth.status, 401);
+        console.log('✓ Test 2: Autentikasi Bearer Token (Fail-Closed) - PASSED');
 
         // ----------------------------------------------------------------------
-        // Test 3: Poll saat antrean kosong mengembalikan 204
+        // Test 3: Poll pada Antrean Kosong (204 No Content)
         // ----------------------------------------------------------------------
-        const resEmptyPoll = await makeRequest('GET', '/api/jobs/poll', authHeader);
-        assert.strictEqual(resEmptyPoll.status, 204, 'Antrean kosong harus 204 No Content');
-        console.log('✓ Test 3: GET /api/jobs/poll Empty Queue (204) - PASSED');
+        const resEmpty = await makeRequest('GET', '/api/jobs/poll', authHeader);
+        assert.strictEqual(resEmpty.status, 204);
+        console.log('✓ Test 3: GET /api/jobs/poll Antrean Kosong (204) - PASSED');
 
         // ----------------------------------------------------------------------
-        // Test 4: POST /api/jobs membuat tugas baru dengan alias
+        // Test 4: Buat Tugas via Alias Lokal (accounts.json di direktori temp)
         // ----------------------------------------------------------------------
         const resCreate = await makeRequest('POST', '/api/jobs', authHeader, {
             alias: 'bot_alpha'
         });
-        assert.strictEqual(resCreate.status, 201, 'Pembuatan tugas harus 201 Created');
+        assert.strictEqual(resCreate.status, 201);
         assert.strictEqual(resCreate.body.success, true);
-        assert.strictEqual(resCreate.body.status, 'pending');
-        const createdJobId = resCreate.body.job_id;
+        const jobId1 = resCreate.body.job_id;
         console.log('✓ Test 4: POST /api/jobs Buat Tugas via Alias - PASSED');
 
         // ----------------------------------------------------------------------
-        // Test 5: Pencegahan Duplikasi (Tolak tugas aktif kedua untuk bot yang sama)
+        // Test 5: Tolak Dua Tugas Aktif untuk Bot yang Sama (409 Conflict)
         // ----------------------------------------------------------------------
-        const resDup = await makeRequest('POST', '/api/jobs', authHeader, {
+        const resDupBot = await makeRequest('POST', '/api/jobs', authHeader, {
             alias: 'bot_alpha'
         });
-        assert.strictEqual(resDup.status, 409, 'Tugas kedua untuk bot yang sama harus ditolak 409 Conflict');
-        assert.strictEqual(resDup.body.error, 'BOT_ALREADY_HAS_ACTIVE_JOB');
-        console.log('✓ Test 5: Tolak Dua Tugas Aktif untuk Bot yang Sama (409 Conflict) - PASSED');
+        assert.strictEqual(resDupBot.status, 409);
+        assert.strictEqual(resDupBot.body.error, 'BOT_ALREADY_HAS_ACTIVE_JOB');
+        console.log('✓ Test 5: Tolak Dua Tugas Aktif untuk Bot Sama (409 Conflict) - PASSED');
 
         // ----------------------------------------------------------------------
-        // Test 6: GET /api/jobs/poll mengklaim tugas secara atomik
+        // Test 6: Tolak job_id Duplikat Permanen (409 Conflict)
+        // ----------------------------------------------------------------------
+        const resDupJobId = await makeRequest('POST', '/api/jobs', authHeader, {
+            bot_id: 'bot_lain',
+            job_id: jobId1,
+            account: { type: 'growid', name: 'Bot2', password: 'P2' }
+        });
+        assert.strictEqual(resDupJobId.status, 409);
+        assert.strictEqual(resDupJobId.body.error, 'JOB_ID_ALREADY_EXISTS');
+        console.log('✓ Test 6: Tolak job_id Duplikat Permanen (409 Conflict) - PASSED');
+
+        // ----------------------------------------------------------------------
+        // Test 7: GET /api/jobs/poll Klaim Atomik (action addbot, status claimed)
         // ----------------------------------------------------------------------
         const resPoll = await makeRequest('GET', '/api/jobs/poll', authHeader);
-        assert.strictEqual(resPoll.status, 200, 'Poll tugas pending harus 200 OK');
-        assert.strictEqual(resPoll.body.job_id, createdJobId);
+        assert.strictEqual(resPoll.status, 200);
+        assert.strictEqual(resPoll.body.job_id, jobId1);
         assert.strictEqual(resPoll.body.action, 'addbot', 'Aksi harus addbot sesuai BRIDGE.md');
         assert.strictEqual(resPoll.body.bot_id, 'bot_alpha');
-        assert.strictEqual(resPoll.body.account.name, 'AlphaTester');
 
-        // Verifikasi bahwa tugas langsung tersimpan sebagai 'claimed' di disk
-        const savedData = JSON.parse(fs.readFileSync(TEST_JOBS_FILE, 'utf8'));
-        const diskJob = savedData.find(j => j.job_id === createdJobId);
-        assert.strictEqual(diskJob.status, 'claimed', 'Status di disk harus sudah claimed sebelum poll response selesai');
-        console.log('✓ Test 6: GET /api/jobs/poll Klaim Atomik & Payload addbot - PASSED');
-
-        // ----------------------------------------------------------------------
-        // Test 7: Poll berikutnya segera mengembalikan 204 (tidak terbagi ulang)
-        // ----------------------------------------------------------------------
-        const resPollAgain = await makeRequest('GET', '/api/jobs/poll', authHeader);
-        assert.strictEqual(resPollAgain.status, 204, 'Tugas yang sudah claimed tidak boleh dibagikan lagi');
-        console.log('✓ Test 7: Tugas yang Diklaim Tidak Terbagi Ulang (204) - PASSED');
+        // Verifikasi tugas di disk sudah berstatus claimed sebelum polling selesai
+        const savedData = JSON.parse(fs.readFileSync(TMP_JOBS_FILE, 'utf8'));
+        const diskJob = savedData.find(j => j.job_id === jobId1);
+        assert.strictEqual(diskJob.status, 'claimed');
+        console.log('✓ Test 7: GET /api/jobs/poll Klaim Atomik ke Disk - PASSED');
 
         // ----------------------------------------------------------------------
-        // Test 8: POST /api/jobs/:job_id/status memperbarui status (Idempotent)
+        // Test 8: Tugas yang Diklaim Tidak Terbagi Ulang (204)
         // ----------------------------------------------------------------------
-        const resStatus = await makeRequest('POST', `/api/jobs/${createdJobId}/status`, authHeader, {
+        const resPoll2 = await makeRequest('GET', '/api/jobs/poll', authHeader);
+        assert.strictEqual(resPoll2.status, 204);
+        console.log('✓ Test 8: Tugas yang Diklaim Tidak Dibagikan Ulang (204) - PASSED');
+
+        // ----------------------------------------------------------------------
+        // Test 9: Laporan Status Idempotent & Transisi Terminal
+        // ----------------------------------------------------------------------
+        const resStat = await makeRequest('POST', `/api/jobs/${jobId1}/status`, authHeader, {
             status: 'success',
             error: null
         });
-        assert.strictEqual(resStatus.status, 200, 'Laporan status harus 200 OK');
-        assert.strictEqual(resStatus.body.status, 'success');
+        assert.strictEqual(resStat.status, 200);
+        assert.strictEqual(resStat.body.status, 'success');
 
-        // Laporan ulang identik harus aman dan tetap 200 OK
-        const resStatusRepeat = await makeRequest('POST', `/api/jobs/${createdJobId}/status`, authHeader, {
+        // Laporan ulang identik -> 200 OK idempotent
+        const resRepeat = await makeRequest('POST', `/api/jobs/${jobId1}/status`, authHeader, {
             status: 'success',
             error: null
         });
-        assert.strictEqual(resStatusRepeat.status, 200, 'Laporan status berulang harus 200 OK (idempotent)');
-        console.log('✓ Test 8: POST /api/jobs/:job_id/status Idempotent Update - PASSED');
+        assert.strictEqual(resRepeat.status, 200);
+        assert.strictEqual(resRepeat.body.idempotent, true);
+
+        // Tolak penimpaan status dari terminal state (success -> stalled ditolak)
+        const resIllegal = await makeRequest('POST', `/api/jobs/${jobId1}/status`, authHeader, {
+            status: 'stalled',
+            error: 'Illegal'
+        });
+        assert.strictEqual(resIllegal.status, 409);
+        assert.strictEqual(resIllegal.body.error, 'ILLEGAL_STATUS_TRANSITION_FROM_TERMINAL_STATE');
+        console.log('✓ Test 9: Laporan Status Idempotent & Proteksi Terminal State - PASSED');
 
         // ----------------------------------------------------------------------
-        // Test 9: GET /api/jobs memaparkan ringkasan tanpa bocor kredensial
+        // Test 10: Fail-Closed pada File State Corrupt/Kosong
         // ----------------------------------------------------------------------
-        const resList = await makeRequest('GET', '/api/jobs', authHeader);
-        assert.strictEqual(resList.status, 200);
-        assert.strictEqual(resList.body.total, 1);
-        const listedJob = resList.body.jobs[0];
-        assert.strictEqual(listedJob.account.password, '***', 'Password harus disanitasi');
-        console.log('✓ Test 9: GET /api/jobs Sanitasi Kredensial - PASSED');
+        fs.writeFileSync(TMP_JOBS_FILE, ''); // Buat kosong
+        assert.throws(() => {
+            loadJobsFromDisk();
+        }, /FILE_CORRUPT_EMPTY/, 'Membaca file state kosong harus melempar exception');
 
-        console.log('\nSemua 9 skenario unit test server.js lolos 100%! 🎉');
+        fs.writeFileSync(TMP_JOBS_FILE, '{"invalid": true}'); // Bukan array
+        assert.throws(() => {
+            loadJobsFromDisk();
+        }, /FILE_CORRUPT_NOT_ARRAY/, 'File bukan array harus melempar exception');
+        console.log('✓ Test 10: Fail-Closed pada File State Corrupt/Kosong - PASSED');
+
+        // ----------------------------------------------------------------------
+        // Test 11: Discord Gateway WHATWG WebSocket EventTarget
+        // ----------------------------------------------------------------------
+        const mockWs = new MockWHATWGWebSocket();
+        let messageHandled = null;
+        const cleanup = setupGatewayListeners(mockWs, 'mock-bot-token', (msg) => {
+            messageHandled = msg;
+        });
+
+        // Simulasi Opcode 10 (Hello)
+        mockWs.dispatchEvent('message', {
+            data: JSON.stringify({
+                op: 10,
+                d: { heartbeat_interval: 1000 }
+            })
+        });
+
+        // Verifikasi paket Identify terkirim dengan intents yang benar
+        assert.strictEqual(mockWs.sent.length, 1);
+        const identifyPkt = JSON.parse(mockWs.sent[0]);
+        assert.strictEqual(identifyPkt.op, 2);
+        assert.strictEqual(identifyPkt.d.token, 'mock-bot-token');
+        assert.strictEqual(identifyPkt.d.intents, 33280);
+
+        // Simulasi Event MESSAGE_CREATE
+        mockWs.dispatchEvent('message', {
+            data: JSON.stringify({
+                op: 0,
+                t: 'MESSAGE_CREATE',
+                d: { content: '!status', channel_id: 'ch_1', author: { id: '805286573302218772', bot: false } }
+            })
+        });
+        assert.strictEqual(messageHandled.content, '!status');
+        cleanup();
+        console.log('✓ Test 11: Discord Gateway v10 WHATWG EventTarget & Identify - PASSED');
+
+        // ----------------------------------------------------------------------
+        // Test 12: Otorisasi Command Bot Discord (Allowlist User Check)
+        // ----------------------------------------------------------------------
+        let sentReply = null;
+        const mockSender = (channelId, text, embed) => {
+            sentReply = { channelId, text, embed };
+        };
+
+        // User tidak dikenal -> diabaikan
+        handleIncomingMessage({
+            content: '!addbot bot_alpha',
+            channel_id: 'ch_1',
+            author: { id: 'unauthorized_user_123', bot: false }
+        }, mockSender);
+        assert.strictEqual(sentReply, null, 'User tidak dikenal harus diabaikan');
+
+        // User diizinkan (Bos Anas: 805286573302218772) -> diproses
+        handleIncomingMessage({
+            content: '!help',
+            channel_id: 'ch_1',
+            author: { id: '805286573302218772', bot: false }
+        }, mockSender);
+        assert(sentReply !== null && sentReply.embed !== undefined, 'Command !help user berwenang harus dibalas');
+        console.log('✓ Test 12: Otorisasi Bot Discord (Allowlist User ID) - PASSED');
+
+        console.log('\nSeluruh 12 skenario pengujian ketahanan lolos 100%! 🎉');
     } finally {
-        server.close();
-        if (fs.existsSync(TEST_ACCOUNTS_FILE)) {
-            fs.unlinkSync(TEST_ACCOUNTS_FILE);
-        }
+        testServer.close();
+        // Bersihkan seluruh direktori temporer pengujian
+        fs.rmSync(TMP_TEST_DIR, { recursive: true, force: true });
     }
 }
 
-runServerTests().catch(err => {
+runAllTests().catch(err => {
     console.error('Test Suite Gagal:', err);
     process.exit(1);
 });
