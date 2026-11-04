@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+*.local.lua
+node_modules/
+data/
+controller-journal.json
+controller-journal.json.tmp
