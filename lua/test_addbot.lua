@@ -118,6 +118,9 @@ local function runTests()
 
     local b2_2, r2_2 = M.addAndVerifyBot({ type = "growid", name = "   ", password = "pass" })
     assert(b2_2 == nil and r2_2 == "EMPTY_GROWID_NAME", "Test 2 Gagal: Nama kosong harus ditolak")
+
+    local b2_3, r2_3 = M.addAndVerifyBot({ type = "growid", name = "Bot", password = "   " })
+    assert(b2_3 == nil and r2_3 == "EMPTY_GROWID_PASSWORD", "Test 2 Gagal: Password whitespace harus ditolak")
     print("✓ Test 2: Validasi Kredensial GrowID (Empty/Whitespace) - PASSED")
 
     -- --------------------------------------------------------------------------
@@ -339,7 +342,80 @@ local function runTests()
     assert(r9 == "ONLINE", "Test 9 Gagal: Status harus tetap ONLINE")
     print("✓ Test 9: Telemetri Error Resilience (getPing/getWorld Crash Terisolasi) - PASSED")
 
-    print("\nSemua 9 skenario unit test mock lolos 100%! 🎉")
+    -- --------------------------------------------------------------------------
+    -- Test 10: Exception addBot tetapi Bot Sempat Masuk Manager (Post-Check Recovery)
+    -- --------------------------------------------------------------------------
+    mockBotsManager = {}
+    mockSentPayloads = {}
+    addBot = function(opts)
+        local bname = type(opts) == "table" and opts.name or opts
+        mockBotsManager[bname] = {
+            name = bname,
+            status = BotStatus.online,
+            connect = function() end,
+            getPing = function() return 10 end,
+            isInWorld = function() return false end
+        }
+        error("Simulasi addBot melempar exception setelah mendaftarkan bot")
+    end
+
+    local b10, r10 = M.addAndVerifyBot({
+        type = "growid",
+        name = "BotPostRecover",
+        password = "ValidPassword"
+    })
+
+    assert(b10 ~= nil, "Test 10 Gagal: Bot seharusnya ter-recover dari manager")
+    assert(r10 == "ONLINE", "Test 10 Gagal: Status harus tetap ONLINE")
+    print("✓ Test 10: Exception addBot dengan Bot Masuk Manager (Post-Check Recovery) - PASSED")
+
+    -- --------------------------------------------------------------------------
+    -- Test 11: Exception addBot dan Bot Belum Ada di Manager (REGISTRATION_UNCERTAIN)
+    -- --------------------------------------------------------------------------
+    mockBotsManager = {}
+    mockSentPayloads = {}
+    Webhook.new = function(url)
+        return {
+            url = url,
+            content = "",
+            embed1 = {
+                use = false,
+                title = "",
+                description = "",
+                color = 0,
+                fields = {},
+                addField = function(self, name, val, inline)
+                    table.insert(self.fields, { name = name, value = val, inline = inline })
+                end
+            },
+            send = function(self)
+                table.insert(mockSentPayloads, {
+                    url = self.url,
+                    title = self.embed1.title,
+                    description = self.embed1.description,
+                    color = self.embed1.color,
+                    fields = self.embed1.fields
+                })
+            end
+        }
+    end
+    addBot = function(opts)
+        error("Simulasi addBot fatal error tanpa sempat mendaftar")
+    end
+
+    local b11, r11, wh11 = M.addAndVerifyBot({
+        type = "growid",
+        name = "BotFatalError",
+        password = "ValidPassword"
+    }, "https://discord.com/api/webhooks/mock/11")
+
+    assert(b11 == nil, "Test 11 Gagal: Return bot harus nil")
+    assert(r11 == "REGISTRATION_UNCERTAIN", "Test 11 Gagal: Status harus REGISTRATION_UNCERTAIN")
+    assert(wh11.success == true, "Test 11 Gagal: Webhook status ambigu harus terkirim")
+    assert(mockSentPayloads[1].title == "Status Registrasi Ambigu", "Test 11 Gagal: Judul webhook harus Status Registrasi Ambigu")
+    print("✓ Test 11: Exception addBot tanpa Bot di Manager (REGISTRATION_UNCERTAIN) - PASSED")
+
+    print("\nSemua 11 skenario unit test mock lolos 100%! 🎉")
 end
 
 runTests()

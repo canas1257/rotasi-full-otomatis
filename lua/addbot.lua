@@ -175,7 +175,7 @@ function M.addAndVerifyBot(account, webhookUrl)
         if type(account.name) ~= "string" or account.name:match("^%s*$") then
             return nil, "EMPTY_GROWID_NAME", { success = false, code = "VALIDATION_FAILED" }
         end
-        if type(account.password) ~= "string" or account.password == "" then
+        if type(account.password) ~= "string" or account.password:match("^%s*$") then
             return nil, "EMPTY_GROWID_PASSWORD", { success = false, code = "VALIDATION_FAILED" }
         end
 
@@ -205,6 +205,20 @@ function M.addAndVerifyBot(account, webhookUrl)
             local ok, res = pcall(addBot, options)
             if ok and res ~= nil then
                 botInstance = res
+            elseif type(getBot) == "function" then
+                -- Cek ulang manager: apakah addBot sempat mendaftarkan bot sebelum crash/return?
+                local postCheck = getBot(botLookupKey)
+                if postCheck ~= nil then
+                    botInstance = postCheck
+                elseif not ok then
+                    -- Terjadi exception saat addBot dan bot belum terdaftar di manager
+                    local whOk, whCode = sendWebhookReport(activeWebhook, false, "Status Registrasi Ambigu", "Terjadi exception saat memanggil addBot dan bot belum terdeteksi.", {
+                        { name = "Bot Target", value = safeDisplayName, inline = true },
+                        { name = "Tipe Akun", value = accType, inline = true },
+                        { name = "Status", value = "REGISTRATION_UNCERTAIN", inline = true }
+                    })
+                    return nil, "REGISTRATION_UNCERTAIN", { success = whOk, code = whCode }
+                end
             end
         end
 
@@ -253,6 +267,20 @@ function M.addAndVerifyBot(account, webhookUrl)
             local ok, res = pcall(addBot, options)
             if ok and res ~= nil then
                 botInstance = res
+            elseif type(getBot) == "function" then
+                -- Cek ulang manager: apakah addBot sempat mendaftarkan bot sebelum crash/return?
+                local postCheck = getBot(botLookupKey)
+                if postCheck ~= nil then
+                    botInstance = postCheck
+                elseif not ok then
+                    -- Terjadi exception saat addBot dan bot belum terdaftar di manager
+                    local whOk, whCode = sendWebhookReport(activeWebhook, false, "Status Registrasi Ambigu", "Terjadi exception saat memanggil addBot dan bot belum terdeteksi.", {
+                        { name = "Bot Target", value = safeDisplayName, inline = true },
+                        { name = "Tipe Akun", value = accType, inline = true },
+                        { name = "Status", value = "REGISTRATION_UNCERTAIN", inline = true }
+                    })
+                    return nil, "REGISTRATION_UNCERTAIN", { success = whOk, code = whCode }
+                end
             end
         end
     else
