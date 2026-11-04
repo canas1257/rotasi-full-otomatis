@@ -65,7 +65,19 @@ function sendDiscordMessage(channelId, content, embed, tokenOverride, callback) 
 // 3. BRIDGE API CLIENT (Berkomunikasi dengan server.js)
 // ------------------------------------------------------------------------------
 function callBridgeApi(method, endpoint, postData, secretOverride, callback) {
-    const activeSecret = secretOverride || API_SECRET;
+    let activeSecret = API_SECRET;
+    let actualCallback = callback;
+
+    if (typeof secretOverride === 'function') {
+        actualCallback = secretOverride;
+    } else if (typeof secretOverride === 'string') {
+        activeSecret = secretOverride;
+    }
+
+    if (typeof actualCallback !== 'function') {
+        actualCallback = () => {};
+    }
+
     const url = new URL(endpoint, API_BASE_URL);
     const isHttps = url.protocol === 'https:';
     const client = isHttps ? https : http;
@@ -95,12 +107,12 @@ function callBridgeApi(method, endpoint, postData, secretOverride, callback) {
             if (resData) {
                 try { parsed = JSON.parse(resData); } catch (e) { parsed = resData; }
             }
-            callback(null, res.statusCode, parsed);
+            actualCallback(null, res.statusCode, parsed);
         });
     });
 
     req.on('error', err => {
-        callback(err);
+        actualCallback(err);
     });
 
     if (bodyStr) req.write(bodyStr);
@@ -191,7 +203,7 @@ function startDiscordBot() {
 
     const ws = new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json');
     setupGatewayListeners(ws, BOT_TOKEN, (msg) => {
-        handleIncomingMessage(msg, sendDiscordMessage, (m, e, d, cb) => callBridgeApi(m, e, d, null, cb));
+        handleIncomingMessage(msg, sendDiscordMessage, callBridgeApi);
     });
 }
 

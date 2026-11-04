@@ -4,5 +4,7 @@
 *.local.lua
 node_modules/
 data/
+accounts.json
+!accounts.example.json
 controller-journal.json
 controller-journal.json.tmp

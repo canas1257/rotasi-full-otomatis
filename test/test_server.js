@@ -38,7 +38,7 @@ process.env.ACCOUNTS_FILE = TMP_ACCOUNTS_FILE;
 process.env.NODE_ENV = 'test';
 
 const { createServerInstance, loadJobsFromDisk, inMemoryJobs, setJobs } = require('../server.js');
-const { handleIncomingMessage, setupGatewayListeners } = require('../discord-bot.js');
+const { handleIncomingMessage, setupGatewayListeners, callBridgeApi } = require('../discord-bot.js');
 
 const testServer = createServerInstance(TEST_SECRET);
 
@@ -291,7 +291,49 @@ async function runAllTests() {
         assert(sentReply !== null && sentReply.embed !== undefined, 'Command !help user berwenang harus dibalas');
         console.log('✓ Test 12: Otorisasi Bot Discord (Allowlist User ID) - PASSED');
 
-        console.log('\nSeluruh 12 skenario pengujian ketahanan lolos 100%! 🎉');
+        // ----------------------------------------------------------------------
+        // Test 13: End-to-End Gateway Pipeline: Gateway Event -> Command -> Bridge HTTP -> Reply
+        // ----------------------------------------------------------------------
+        const e2eWs = new MockWHATWGWebSocket();
+        let e2eReply = null;
+        const e2eSender = (channelId, text, embed) => {
+            e2eReply = { channelId, text, embed };
+        };
+
+        // Pasang listener dengan wiring persis seperti di startDiscordBot
+        const e2eCleanup = setupGatewayListeners(e2eWs, 'e2e-token', (msg) => {
+            handleIncomingMessage(msg, e2eSender, callBridgeApi);
+        });
+
+        // Trigger event MESSAGE_CREATE dengan command !status
+        e2eWs.dispatchEvent('message', {
+            data: JSON.stringify({
+                op: 0,
+                t: 'MESSAGE_CREATE',
+                d: {
+                    content: '!status',
+                    channel_id: 'ch_e2e_status',
+                    author: { id: '805286573302218772', bot: false }
+                }
+            })
+        });
+
+        // Tunggu request HTTP asinkron ke server bridge selesai
+        await new Promise(resolve => {
+            const checkInterval = setInterval(() => {
+                if (e2eReply !== null) {
+                    clearInterval(checkInterval);
+                    resolve();
+                }
+            }, 50);
+        });
+
+        assert.strictEqual(e2eReply.channelId, 'ch_e2e_status');
+        assert(e2eReply.embed !== null && e2eReply.embed.title === '📊 Status Antrean Bot Lucifer', 'Judul embed status harus sesuai');
+        e2eCleanup();
+        console.log('✓ Test 13: End-to-End Pipeline (Gateway Event -> REST Bridge -> Embed Reply) - PASSED');
+
+        console.log('\nSeluruh 13 skenario pengujian ketahanan lolos 100%! 🎉');
     } finally {
         testServer.close();
         // Bersihkan seluruh direktori temporer pengujian
